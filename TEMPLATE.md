@@ -49,6 +49,7 @@ Built for running efficiently on your everyday hardware - no need for enterprise
 ### 🔗 Model Sources
 
 - **Repository:** [Hugging Face Repo](https://huggingface.co/leeminwaan/{{base_model}}-GGUF) 🤗📦  
+- **Quantization Tool:** [AllQuants](https://github.com/plsgivemeachane/allquants) 🔢⚡  
 - **Paper [optional]:** No research paper (this is practical, not academic) 📝❌  
 - **Demo [optional]:** Demo coming soon™ 🎮🔜  
 

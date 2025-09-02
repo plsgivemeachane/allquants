@@ -1,5 +1,7 @@
 # 🔢 AllQuants - Comprehensive Model Quantizer
 
+> **🔗 GitHub Repository:** [https://github.com/plsgivemeachane/allquants](https://github.com/plsgivemeachane/allquants)
+
 AllQuants is a powerful tool that automates the complete workflow of downloading, converting, and quantizing language models using Hugging Face and LLAMA.cpp. It provides beautiful rich console output and handles the entire process from model download to Hugging Face repository upload.
 
 ## ✨ Features
