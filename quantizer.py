@@ -252,12 +252,32 @@ class ModelQuantizer:
         self.console.print(f"[green]✓ GGUF conversion completed: {gguf_path}[/green]")
         return gguf_path
     
-    def quantize_model(self, gguf_path: Path, model_name: str, quant_types: List[str] = None) -> List[Path]:
-        """Quantize GGUF model to specified types"""
+    def upload_single_file(self, file_path: Path, repo_id: str) -> bool:
+        """Upload a single file to Hugging Face repository"""
+        try:
+            self.console.print(f"[cyan]📤 Uploading {file_path.name}...[/cyan]")
+            self.hf_api.upload_file(
+                path_or_fileobj=str(file_path),
+                path_in_repo=file_path.name,
+                repo_id=repo_id,
+                commit_message=f"Add {file_path.name}"
+            )
+            self.console.print(f"[green]✓ Uploaded {file_path.name}[/green]")
+            return True
+        except Exception as e:
+            self.console.print(f"[red]✗ Failed to upload {file_path.name}: {e}[/red]")
+            return False
+    
+    def quantize_model(self, gguf_path: Path, model_name: str, quant_types: List[str] = None, 
+                      upload_on_fly: bool = False, repo_id: Optional[str] = None) -> List[Path]:
+        """Quantize GGUF model to specified types with optional on-the-fly upload and deletion"""
         if quant_types is None:
             quant_types = [config.name for config in self.QUANTIZATION_TYPES]
         
         self.console.print(Panel(f"[bold yellow]⚡ Quantizing Model: {model_name}[/bold yellow]", expand=False))
+        
+        if upload_on_fly and not repo_id:
+            raise ValueError("repo_id must be provided when upload_on_fly is True")
         
         # Find llama-quantize executable
         quantize_exe = None
@@ -271,6 +291,7 @@ class ModelQuantizer:
             raise FileNotFoundError("llama-quantize executable not found in llama.cpp directory")
         
         quantized_files = []
+        uploaded_files = []
         
         with Progress(
             SpinnerColumn(),
@@ -289,7 +310,7 @@ class ModelQuantizer:
                 output_filename = f"{base_name}-{quant_type.lower()}.gguf"
                 output_path = self.quantized_dir / output_filename
                 
-                if output_path.exists():
+                if output_path.exists() and not upload_on_fly:
                     self.console.print(f"[yellow]Quantized file already exists: {output_path}[/yellow]")
                     quantized_files.append(output_path)
                     progress.update(main_task, advance=1)
@@ -312,12 +333,32 @@ class ModelQuantizer:
                 )
                 
                 if returncode == 0:
-                    quantized_files.append(output_path)
                     self.console.print(f"[green]✓ {quant_type} quantization completed[/green]")
+                    
+                    if upload_on_fly:
+                        # Upload immediately and delete to save space
+                        if self.upload_single_file(output_path, repo_id):
+                            uploaded_files.append(output_path.name)
+                            # Delete the file to save space
+                            try:
+                                output_path.unlink()
+                                self.console.print(f"[dim]🗑️ Deleted {output_path.name} to save space[/dim]")
+                            except Exception as e:
+                                self.console.print(f"[yellow]Warning: Could not delete {output_path.name}: {e}[/yellow]")
+                        else:
+                            self.console.print(f"[red]Upload failed for {output_path.name}, keeping file[/red]")
+                            quantized_files.append(output_path)
+                    else:
+                        quantized_files.append(output_path)
                 else:
                     self.console.print(f"[red]✗ {quant_type} quantization failed: {stderr}[/red]")
                 
                 progress.update(main_task, advance=1)
+        
+        if upload_on_fly:
+            self.console.print(f"[green]✓ Uploaded {len(uploaded_files)} files on-the-fly[/green]")
+            # Return the names of uploaded files instead of paths
+            return [Path(name) for name in uploaded_files]
         
         return quantized_files
     
@@ -338,60 +379,7 @@ class ModelQuantizer:
         
         return model_card
     
-    def create_and_upload_repo(self, model_name: str, quantized_files: List[Path]) -> str:
-        """Create Hugging Face repository and upload quantized models"""
-        # Extract just the model name without the original namespace
-        clean_model_name = model_name.split("/")[-1] if "/" in model_name else model_name
-        repo_name = f"{clean_model_name}-GGUF"
-        repo_id = f"leeminwaan/{repo_name}"
-        
-        self.console.print(Panel(f"[bold cyan]📤 Creating Repository: {repo_id}[/bold cyan]", expand=False))
-        
-        try:
-            # Create repository
-            create_repo(repo_id=repo_id, exist_ok=True)
-            self.console.print(f"[green]✓ Repository created: {repo_id}[/green]")
-            
-            # Generate and upload model card
-            model_card = self.generate_model_card(model_name, quantized_files)
-            self.hf_api.upload_file(
-                path_or_fileobj=model_card.encode(),
-                path_in_repo="README.md",
-                repo_id=repo_id,
-                commit_message=f"Add model card for {model_name}"
-            )
-            
-            # Upload quantized files
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-                TimeElapsedColumn(),
-                console=self.console
-            ) as progress:
-                
-                upload_task = progress.add_task("Uploading files...", total=len(quantized_files))
-                
-                for file_path in quantized_files:
-                    progress.update(upload_task, description=f"Uploading {file_path.name}...")
-                    
-                    self.hf_api.upload_file(
-                        path_or_fileobj=str(file_path),
-                        path_in_repo=file_path.name,
-                        repo_id=repo_id,
-                        commit_message=f"Add {file_path.name}"
-                    )
-                    
-                    progress.update(upload_task, advance=1)
-            
-            self.console.print(f"[green]✓ All files uploaded to {repo_id}[/green]")
-            return repo_id
-            
-        except Exception as e:
-            self.console.print(f"[red]✗ Failed to create/upload repository: {e}[/red]")
-            raise
-    
+
     def quantize_complete_workflow(
         self, 
         model_name: str, 
@@ -400,11 +388,12 @@ class ModelQuantizer:
         upload: bool = True,
         interactive: bool = True
     ) -> Dict:
-        """Complete quantization workflow with confirmation prompts"""
+        """Complete quantization workflow with confirmation prompts and on-the-fly upload"""
         
         self.console.print(Panel.fit(
             f"[bold white]AllQuants - Complete Model Quantization Workflow[/bold white]\n"
-            f"[cyan]Model: {model_name}[/cyan]",
+            f"[cyan]Model: {model_name}[/cyan]\n"
+            f"[yellow]Upload on-the-fly: {'Enabled' if upload else 'Disabled'}[/yellow]",
             border_style="blue"
         ))
         
@@ -416,6 +405,8 @@ class ModelQuantizer:
             "repo_id": None,
             "success": False
         }
+        
+        repo_id = None
         
         try:
             # Step 1: Download model
@@ -450,12 +441,51 @@ class ModelQuantizer:
             results["gguf_path"] = str(gguf_path)
             self.console.print(f"[green]Step 2 completed: GGUF file created at {gguf_path}[/green]\n")
             
-            # Step 3: Quantize
+            # Step 3: Create repository first if upload is enabled
+            if upload:
+                clean_model_name = model_name.split("/")[-1] if "/" in model_name else model_name
+                repo_name = f"{clean_model_name}-GGUF"
+                repo_id = f"leeminwaan/{repo_name}"
+                
+                self.console.print(Panel(
+                    f"[bold cyan]Step 3: Create Repository[/bold cyan]\n"
+                    f"Creating repository: [cyan]{repo_id}[/cyan]\n"
+                    f"This will be used for on-the-fly uploads",
+                    border_style="cyan"
+                ))
+                
+                if interactive and not Confirm.ask("Continue with repository creation?", default=True):
+                    self.console.print("[yellow]Workflow cancelled at repository creation step.[/yellow]")
+                    return results
+                
+                try:
+                    # Create repository
+                    create_repo(repo_id=repo_id, exist_ok=True)
+                    self.console.print(f"[green]✓ Repository created: {repo_id}[/green]")
+                    
+                    # Generate and upload model card
+                    model_card = self.generate_model_card(model_name, [])
+                    self.hf_api.upload_file(
+                        path_or_fileobj=model_card.encode(),
+                        path_in_repo="README.md",
+                        repo_id=repo_id,
+                        commit_message=f"Add model card for {model_name}"
+                    )
+                    self.console.print(f"[green]✓ Model card uploaded[/green]\n")
+                    
+                except Exception as e:
+                    self.console.print(f"[red]✗ Failed to create repository: {e}[/red]")
+                    upload = False  # Disable upload if repo creation fails
+            
+            # Step 4: Quantize (with on-the-fly upload if enabled)
             num_types = len(quant_types) if quant_types else len(self.QUANTIZATION_TYPES)
+            step_name = "Step 4: Quantize and Upload" if upload else "Step 4: Quantize Model"
+            
             self.console.print(Panel(
-                f"[bold yellow]Step 3: Quantize Model[/bold yellow]\n"
+                f"[bold yellow]{step_name}[/bold yellow]\n"
                 f"About to quantize to [cyan]{num_types}[/cyan] different formats\n"
                 f"Types: {', '.join(quant_types) if quant_types else 'All 14 types'}\n"
+                f"{'Files will be uploaded immediately and deleted to save space' if upload else 'Files will be saved locally'}\n"
                 f"This is the most time-consuming step and may take 30+ minutes",
                 border_style="yellow"
             ))
@@ -464,27 +494,22 @@ class ModelQuantizer:
                 self.console.print("[yellow]Workflow cancelled at quantization step.[/yellow]")
                 return results
             
-            quantized_files = self.quantize_model(gguf_path, model_name, quant_types)
-            results["quantized_files"] = [str(f) for f in quantized_files]
-            self.console.print(f"[green]Step 3 completed: {len(quantized_files)} quantized files created[/green]\n")
+            # Use the new quantize_model with upload_on_fly parameter
+            quantized_files = self.quantize_model(
+                gguf_path, 
+                model_name, 
+                quant_types, 
+                upload_on_fly=upload, 
+                repo_id=repo_id
+            )
             
-            # Step 4: Upload to Hugging Face (if requested)
-            if upload and quantized_files:
-                self.console.print(Panel(
-                    f"[bold yellow]Step 4: Upload to Hugging Face[/bold yellow]\n"
-                    f"About to create repository: [cyan]leeminwaan/{model_name}-GGUF[/cyan]\n"
-                    f"Will upload [cyan]{len(quantized_files)}[/cyan] quantized files\n"
-                    f"This will make the models publicly available",
-                    border_style="yellow"
-                ))
-                
-                if interactive and not Confirm.ask("Continue with Hugging Face upload?", default=True):
-                    self.console.print("[yellow]Skipping upload step.[/yellow]")
-                    results["repo_id"] = "Upload skipped by user"
-                else:
-                    repo_id = self.create_and_upload_repo(model_name, quantized_files)
-                    results["repo_id"] = repo_id
-                    self.console.print(f"[green]Step 4 completed: Repository created at {repo_id}[/green]\n")
+            results["quantized_files"] = [str(f) for f in quantized_files]
+            results["repo_id"] = repo_id if upload else "Not uploaded"
+            
+            if upload:
+                self.console.print(f"[green]Step 4 completed: {len(quantized_files)} files quantized and uploaded on-the-fly[/green]\n")
+            else:
+                self.console.print(f"[green]Step 4 completed: {len(quantized_files)} quantized files created[/green]\n")
             
             results["success"] = True
             
@@ -493,7 +518,8 @@ class ModelQuantizer:
                 f"[bold green]Quantization Complete![/bold green]\n"
                 f"[white]Model: {model_name}[/white]\n"
                 f"[white]Quantized files: {len(quantized_files)}[/white]\n"
-                f"[white]Repository: {results.get('repo_id', 'Not uploaded')}[/white]",
+                f"[white]Repository: {results.get('repo_id', 'Not uploaded')}[/white]\n"
+                f"[white]Space saved: {'Yes - files uploaded and deleted' if upload else 'No - files kept locally'}[/white]",
                 border_style="green"
             ))
             
